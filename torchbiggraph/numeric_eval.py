@@ -1,50 +1,36 @@
 import logging
-from collections import defaultdict
-from typing import Dict, List, Tuple
-
-from torchbiggraph.config import ConfigSchema
-from torchbiggraph.edgelist import EdgeList
-from torchbiggraph.eval import RankingEvaluator
-from torchbiggraph.graph_storages import EDGE_STORAGES
-from torchbiggraph.losses import LOSS_FUNCTIONS
-from torchbiggraph.model import Scores
-from torchbiggraph.stats import Stats
-from torchbiggraph.types import UNPARTITIONED
-
 
 logger = logging.getLogger("torchbiggraph")
 
 import pandas as pd
-from collections import defaultdict
 import faiss, json
-from torchbiggraph.model import DotComparator, CosComparator
 from torchbiggraph.operators import ComplexDiagonalDynamicOperator, TranslationDynamicOperator, DiagonalDynamicOperator
 import numpy as np
 from functools import lru_cache
 import h5py, torch
-import re
 from glob import glob
+
 
 class NumericMetricsReporter(object):
     def __init__(self, checkpoint_path, index_type='Flat'):
-        
+
         _, dataset, model = checkpoint_path.split('/')
         self._dataset = dataset
         self._model = model
         self._index_type = index_type
         self._entity_path = f"numeric/{dataset}/edge/entities"
         self._model_path = f"numeric/{dataset}/{model}"
-        
+
         print("Entity File:", self._entity_path)
         print("Model File:", self._model_path)
-        
+
         # Entity to index mapping
         with open(f'{self._entity_path}/entity_names_all_0.json') as fd:
             self._entity_list = json.load(fd)
         self._entity_index = dict()
         for i, qnode in enumerate(self._entity_list):
             self._entity_index[qnode] = i
-            
+
         self._entity_count = len(self._entity_index)
         self._index_entity = {v: k for k, v in self._entity_index.items()}
 
@@ -53,17 +39,17 @@ class NumericMetricsReporter(object):
             self._rel_type_names = json.load(fd)
         self._rel_index = {r: j for j, r in enumerate(self._rel_type_names)}
         self._index_rel = {v: k for k, v in self._rel_index.items()}
-        
+
         # operators
         self._n_properties = len(self._rel_type_names)
-        
+
         medians_file = f"numeric/{dataset}/medians.dict"
         print("Median File:", medians_file)
         with open(medians_file) as fd:
             self._medians = json.load(fd)
-            
+
         self.load_eval_files()
-    
+
     def load_eval_files(self):
         self._valid = pd.read_csv(f'numeric/{self._dataset}/valid_raw.txt', sep='\t', header=None)
         self._valid[0] = self._valid[0].apply(lambda x: x if not "org" in x else x.split("org")[1][:-1])
@@ -76,13 +62,12 @@ class NumericMetricsReporter(object):
         self._test[1] = self._test[1].apply(lambda x: x if not "com" in x else x.split("com")[1][:-1])
         self._test[1] = self._test[1].apply(lambda x: x if not "org" in x else x.split("org")[1][:-1])
         self._test.columns = ['node1', 'label', 'node2']
-        
-    
+
     def update_index(self):
-        
+
         embedding_file = glob(f"{self._model_path}/embeddings_all_0.v*.h5")[0]
         model_file = glob(f"{self._model_path}/model.v*.h5")[0]
-                
+
         # Load the embeddings
         with h5py.File(embedding_file, "r") as hf:
             self._embedding = torch.from_numpy(hf["embeddings"][...])
@@ -95,13 +80,13 @@ class NumericMetricsReporter(object):
             self._index = faiss.index_factory(self._dim, self._index_type, faiss.METRIC_L2)
         self._index.train(self._embedding.detach().numpy())
         self._index.add(self._embedding.detach().numpy())
-        
+
         # Load the operator's state dict (relation embeddings)
         if 'complex' in self._model_path:
-            
+
             self._operator_lhs = ComplexDiagonalDynamicOperator(self._dim, self._n_properties)
             self._operator_rhs = ComplexDiagonalDynamicOperator(self._dim, self._n_properties)
-            
+
             with h5py.File(model_file, "r") as hf:
                 operator_state_dict_lhs = {
                     "real": torch.from_numpy(hf["model/relations/0/operator/lhs/real"][...]),
@@ -112,7 +97,7 @@ class NumericMetricsReporter(object):
                     "imag": torch.from_numpy(hf["model/relations/0/operator/rhs/imag"][...]),
                 }
         elif 'transe' in self._model_path:
-            
+
             self._operator_lhs = TranslationDynamicOperator(self._dim, self._n_properties)
             self._operator_rhs = TranslationDynamicOperator(self._dim, self._n_properties)
 
@@ -124,7 +109,7 @@ class NumericMetricsReporter(object):
                     "translations": torch.from_numpy(hf["model/relations/0/operator/rhs/translations"][...]),
                 }
         elif 'distmult' in self._model_path:
-            
+
             self._operator_lhs = DiagonalDynamicOperator(self._dim, self._n_properties)
             self._operator_rhs = DiagonalDynamicOperator(self._dim, self._n_properties)
 
@@ -140,11 +125,11 @@ class NumericMetricsReporter(object):
 
         self._operator_lhs.load_state_dict(operator_state_dict_lhs)
         self._operator_rhs.load_state_dict(operator_state_dict_rhs)
-        
+
         self.get_embed.cache_clear()
         self._neighbors_faiss.cache_clear()
-        
-    @lru_cache(maxsize = 50000)
+
+    @lru_cache(maxsize=50000)
     def get_embed(self, head, relation=None):
         ''' This function generate the embeddings for the tail entities:
                 Head entities: Obtained from the model
@@ -152,10 +137,10 @@ class NumericMetricsReporter(object):
         '''
         if relation is None:
             return self._embedding[self._entity_index[head], :].detach().numpy()
-        return  self._operator_lhs(
-                    self._embedding[self._entity_index[head], :].view(1, self._dim),
-                    torch.tensor([self._rel_index[relation]])
-                ).detach().numpy()[0]
+        return self._operator_lhs(
+            self._embedding[self._entity_index[head], :].view(1, self._dim),
+            torch.tensor([self._rel_index[relation]])
+        ).detach().numpy()[0]
 
     @lru_cache(maxsize=50000)
     def _neighbors_faiss(self, head, relation, tail=None, k=10):
@@ -163,22 +148,22 @@ class NumericMetricsReporter(object):
             given the head and the relation (Using the Faiss index)
         '''
         if not tail:
-            return self._index.search(self.get_embed(head, relation).reshape(1,-1), k)
+            return self._index.search(self.get_embed(head, relation).reshape(1, -1), k)
         else:
-            return self._index.search(self.get_embed_rev(tail, relation).reshape(1,-1), k)
+            return self._index.search(self.get_embed_rev(tail, relation).reshape(1, -1), k)
 
     def get_neighbors(self, head, relation, tail=None, k=10):
         if not head in self._entity_index:
             return None, None
         scores, ranking = self._neighbors_faiss(head, relation, tail, k=k)
-        top_entities = [self._index_entity[index] for index in ranking[0] if index>0]
+        top_entities = [self._index_entity[index] for index in ranking[0] if index > 0]
         top_scores = scores[0][:len(top_entities)]
         return top_scores, top_entities
 
     @property
     def index(self):
         return self._index
-    
+
     def model_pred(self, row):
 
         label = row['label']
@@ -187,17 +172,17 @@ class NumericMetricsReporter(object):
 
         if intervals_left is None and intervals_right is None:
             return None
-        
+
         left = None
         for interval in intervals_left:
             if label in interval:
                 left = self._medians[interval]
-        
-        right = None  
+
+        right = None
         for interval in intervals_right:
             if label in interval:
                 right = self._medians[interval]
-              
+
         if left is None and right is None:
             return self._medians[label]
         elif left is None:
@@ -205,34 +190,36 @@ class NumericMetricsReporter(object):
         elif right is None:
             return left
         return (left + right) / 2
-    
+
     def report(self):
-        
+
         # Validation file
-        self._valid.loc[:,'interval_left'] = self._valid.apply(
+        self._valid.loc[:, 'interval_left'] = self._valid.apply(
             lambda r: self.get_neighbors(r['node1'], 'Interval-' + r['label'] + '_left', k=1000)[1], axis=1)
-        self._valid.loc[:,'interval_right'] = self._valid.apply(
+        self._valid.loc[:, 'interval_right'] = self._valid.apply(
             lambda r: self.get_neighbors(r['node1'], 'Interval-' + r['label'] + '_right', k=1000)[1], axis=1)
-        
+
         self._valid['model'] = self._valid.apply(self.model_pred, axis=1)
         self._valid['error'] = abs(self._valid['model'] - self._valid['node2'])
-        
-        ### Report the statistics
-        logger.info(f"/valid/global \t MAE: {self._valid['error'].mean()} \t RMSE: {np.sqrt(np.square(self._valid['error']).mean())}")
+
+        # Report the statistics
+        logger.info(
+            f"/valid/global \t MAE: {self._valid['error'].mean()} \t RMSE: {np.sqrt(np.square(self._valid['error']).mean())}")
         for label in self._valid['label'].unique():
             sli = self._valid[self._valid['label'] == label]
             logger.info(f"{label} \t MAE: {sli['error'].mean()} \t RMSE: {np.sqrt(np.square(sli['error']).mean())}")
-        
-        ### Test file
-        self._test.loc[:,'interval_left'] = self._test.apply(
+
+        # Test file
+        self._test.loc[:, 'interval_left'] = self._test.apply(
             lambda r: self.get_neighbors(r['node1'], 'Interval-' + r['label'] + '_left', k=1000)[1], axis=1)
-        self._test.loc[:,'interval_right'] = self._test.apply(
+        self._test.loc[:, 'interval_right'] = self._test.apply(
             lambda r: self.get_neighbors(r['node1'], 'Interval-' + r['label'] + '_right', k=1000)[1], axis=1)
         self._test['model'] = self._test.apply(self.model_pred, axis=1)
         self._test['error'] = abs(self._test['model'] - self._test['node2'])
-        
-        ### Report the statistics
-        logger.info(f"/test/global \t MAE: {self._test['error'].mean()} \t RMSE: {np.sqrt(np.square(self._test['error']).mean())}")
+
+        # Report the statistics
+        logger.info(
+            f"/test/global \t MAE: {self._test['error'].mean()} \t RMSE: {np.sqrt(np.square(self._test['error']).mean())}")
         for label in self._test['label'].unique():
             sli = self._test[self._test['label'] == label]
             logger.info(f"{label} \t MAE: {sli['error'].mean()} \t RMSE: {np.sqrt(np.square(sli['error']).mean())}")
