@@ -64,6 +64,8 @@ from torchbiggraph.util import (
     split_almost_equally,
     tag_logs_with_process_name,
 )
+from torchbiggraph.eval import do_eval
+from torchbiggraph.numeric_eval import NumericMetricsReporter
 
 
 logger = logging.getLogger("torchbiggraph")
@@ -242,6 +244,8 @@ class TrainingCoordinator:
         rank: Rank = SINGLE_TRAINER,
         subprocess_init: Optional[Callable[[], None]] = None,
         stats_handler: StatsHandler = NOOP_STATS_HANDLER,
+        valid_config: Optional[ConfigSchema] = None,
+        test_config: Optional[ConfigSchema] = None
     ):
         """Each epoch/pass, for each partition pair, loads in embeddings and edgelist
         from disk, runs HOGWILD training on them, and writes partitions back to disk.
@@ -516,8 +520,14 @@ class TrainingCoordinator:
         self.entity_counts = entity_counts
         self.embedding_storage_freelist = embedding_storage_freelist
         self.stats_handler = stats_handler
+        self.subprocess_init = subprocess_init
+        self.valid_config = valid_config
+        self.test_config = test_config
 
         self.strict = False
+        if "numeric" in self.valid_config.entity_path:
+            self.reporter = NumericMetricsReporter(self.test_config.checkpoint_path)
+            
 
     def train(self) -> None:
 
@@ -996,6 +1006,18 @@ class TrainingCoordinator:
         )
         self._barrier()
         dist_logger.info("All workers have switched to the new checkpoint version")
+        
+        if self.valid_config is not None:
+            if "numeric" not in self.valid_config.entity_path:
+                do_eval(self.valid_config, evaluator=None, model=self.model,
+                        subprocess_init=self.subprocess_init)
+                do_eval(self.test_config, evaluator=None, model=self.model,
+                        subprocess_init=self.subprocess_init)
+            else:
+                if (epoch_idx + 1) % 10 == 0:
+                    self.reporter.update_index()
+                    self.reporter.report()
+                    
 
         # After all the machines have finished committing
         # checkpoints, we either remove the old checkpoints

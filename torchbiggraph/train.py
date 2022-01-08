@@ -34,11 +34,14 @@ def train(
     evaluator: Optional[AbstractBatchProcessor] = None,
     rank: Rank = SINGLE_TRAINER,
     subprocess_init: Optional[Callable[[], None]] = None,
+    valid_config: Optional[ConfigSchema] = None,
+    test_config: Optional[ConfigSchema] = None
 ) -> None:
     CoordinatorT = (
         GPUTrainingCoordinator if config.num_gpus > 0 else TrainingCoordinator
     )
-    coordinator = CoordinatorT(config, model, trainer, evaluator, rank, subprocess_init)
+    coordinator = CoordinatorT(config, model, trainer, evaluator, rank, subprocess_init, 
+                               valid_config=valid_config, test_config=test_config)
     coordinator.train()
     coordinator.close()
 
